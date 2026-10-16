@@ -12,17 +12,41 @@ defaults:
 
 jobs:
   verify:
-    name: PostgreSQL correctness / repetition ${{ matrix.repetition }}
+    name: ${{ matrix.database_target }} / repetition ${{ matrix.repetition }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 4
       matrix:
-        repetition: [1, 2]
+        include:
+          - database_target: postgresql-17.11
+            repetition: 1
+            image: postgres:17.11-bookworm@sha256:3645570cccdfa447589da9f57dd740faa29b30938e861289a5574b6ca6b03826
+            expected_version_num: '170011'
+            image_source_url: https://hub.docker.com/_/postgres
+            expected_vendor: ''
+          - database_target: postgresql-17.11
+            repetition: 2
+            image: postgres:17.11-bookworm@sha256:3645570cccdfa447589da9f57dd740faa29b30938e861289a5574b6ca6b03826
+            expected_version_num: '170011'
+            image_source_url: https://hub.docker.com/_/postgres
+            expected_vendor: ''
+          - database_target: percona-postgresql-18
+            repetition: 1
+            image: percona/percona-distribution-postgresql:18.6.1-3@sha256:cf1ef553805898b73764a19276bf2fc9f78148a0215761ad7491c37c3ed31327
+            expected_version_num: '180006'
+            image_source_url: https://docs.percona.com/postgresql/18/docker/docker.html
+            expected_vendor: Percona
+          - database_target: percona-postgresql-18
+            repetition: 2
+            image: percona/percona-distribution-postgresql:18.6.1-3@sha256:cf1ef553805898b73764a19276bf2fc9f78148a0215761ad7491c37c3ed31327
+            expected_version_num: '180006'
+            image_source_url: https://docs.percona.com/postgresql/18/docker/docker.html
+            expected_vendor: Percona
     services:
       postgres:
-        image: postgres:17.11-bookworm@sha256:3645570cccdfa447589da9f57dd740faa29b30938e861289a5574b6ca6b03826
+        image: ${{ matrix.image }}
         env:
           POSTGRES_USER: fixture
           POSTGRES_PASSWORD: synthetic-ephemeral-only
@@ -38,14 +62,18 @@ jobs:
           --health-retries 12
     env:
       DATABASE_URL: postgresql://fixture:synthetic-ephemeral-only@127.0.0.1:5432/crm_correctness
-      EVIDENCE_DIR: ${{ github.workspace }}/evidence/generated/repetition-${{ matrix.repetition }}
+      EVIDENCE_DIR: ${{ github.workspace }}/evidence/generated/${{ matrix.database_target }}/repetition-${{ matrix.repetition }}
+      DATABASE_TARGET: ${{ matrix.database_target }}
       REPETITION: ${{ matrix.repetition }}
-      POSTGRES_IMAGE: postgres:17.11-bookworm@sha256:3645570cccdfa447589da9f57dd740faa29b30938e861289a5574b6ca6b03826
+      POSTGRES_IMAGE: ${{ matrix.image }}
+      EXPECTED_POSTGRES_VERSION_NUM: ${{ matrix.expected_version_num }}
+      IMAGE_SOURCE_URL: ${{ matrix.image_source_url }}
+      EXPECTED_IMAGE_VENDOR: ${{ matrix.expected_vendor }}
       PYTHONDONTWRITEBYTECODE: '1'
       PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
     steps:
-      - name: Check out approved source
+      - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -86,11 +114,11 @@ jobs:
           print(f'Actual artifact bytes before upload: {total}')
           assert 0 < total <= 5 * 1024 * 1024, 'Evidence upload exceeds 5 MiB cap or is empty'
           PY
-      - name: Upload actual evidence, including failures
+      - name: Upload target-labelled evidence, including failures
         if: always() && steps.size.outcome == 'success'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: crm-evidence-${{ github.run_id }}-attempt-${{ github.run_attempt }}-repetition-${{ matrix.repetition }}
+          name: crm-evidence-${{ github.run_id }}-attempt-${{ github.run_attempt }}-${{ matrix.database_target }}-repetition-${{ matrix.repetition }}
           path: ${{ env.EVIDENCE_DIR }}
           retention-days: 7
           if-no-files-found: error

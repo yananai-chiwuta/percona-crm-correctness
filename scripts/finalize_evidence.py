@@ -93,7 +93,9 @@ def main():
     if any(row["outcome"] == "processing" or row["processed_at"] is None
            for rows in final_events.values() for row in rows):
         problems.append("Unfinalized committed inbound event observed")
+    target_name = os.environ["DATABASE_TARGET"]
     summary = {
+        "database_target": target_name,
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_sha": os.environ["GITHUB_SHA"], "run_id": os.environ["GITHUB_RUN_ID"],
         "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"], "repetition": os.environ["REPETITION"],
@@ -102,7 +104,7 @@ def main():
         "verification": "PASS" if not problems else "FAILED_OR_INCOMPLETE",
     }
     (directory / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-    lines = ["# Recorded integration observations", "", "```json", json.dumps(summary, indent=2), "```", "",
+    lines = ["# Recorded integration observations", "", f"Database target: `{target_name}`", "", "```json", json.dumps(summary, indent=2), "```", "",
              "## Sequential stale-event control", "",
              "| Handler | Before delayed revision 11 | After first delayed revision 11 | Event outcome |",
              "|---|---|---|---|"]
