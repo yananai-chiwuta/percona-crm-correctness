@@ -8,10 +8,13 @@ revision.
 
 This is a database correctness experiment. It uses no real contacts, external CRM
 service or production credentials, and makes no production-use or performance claim.
+The fixture calls the local Python `process_event` function against its test database;
+it does not implement an HTTP webhook receiver or communicate with a real CRM.
 
 ## What the experiment demonstrates
 
-T02 delivers revisions 10, 12 and then 11, each with a different event ID:
+The verified T02 runs delivered revisions 10, 12 and then 11, each with a different
+event ID. This table stops immediately after the first delayed revision 11:
 
 | Handler | Before delayed revision 11 | After delayed revision 11 | Recorded event outcome |
 |---|---|---|---|
@@ -25,9 +28,26 @@ See [tests/test_crm.py](tests/test_crm.py).
 
 T03 coordinates two independent workers and a separate observer. The observer must
 prove the follower is blocked by the leader using `pg_blocking_pids`,
-`pg_stat_activity` and `pg_locks`. A stale conditional UPSERT can wait before it
-returns without changing the contact. Both worker orders and existing/absent contacts
-are tested; no latency or throughput comparison is made.
+`pg_stat_activity` and `pg_locks`. In [run 38649001953](https://github.com/yananai-chiwuta/percona-crm-correctness/actions/runs/38649001953),
+against PostgreSQL 17.11, case
+`test_T03_coordinated_revision_race[corrected-higher_first-existing]` recorded:
+
+| Run ID | Database target | Repetition | Leader PID | Follower PID | Follower wait / blocker | Transaction-ID lock evidence |
+|---|---|---:|---:|---:|---|---|
+| 38649001953 | PostgreSQL 17.11 | 1 | 131 | 132 | Lock / transactionid; `pg_blocking_pids(132) = [131]` | XID 824: leader ExclusiveLock granted; follower ShareLock ungranted |
+| 38649001953 | PostgreSQL 17.11 | 2 | 131 | 132 | Lock / transactionid; `pg_blocking_pids(132) = [131]` | XID 824: leader ExclusiveLock granted; follower ShareLock ungranted |
+
+After the leader committed revision 12, the follower's revision 11 returned `stale`;
+the contact retained revision 12, count 2 and last event `e12`. This demonstrates an
+observed lock wait despite no stale contact update. PIDs and transaction IDs describe
+this execution and can change on reruns. Both worker orders and existing/absent
+contacts are tested; no latency or throughput comparison is made.
+
+Evidence: the verified run linked below, both artifacts' `sql-state.txt` (T02
+`before:e11:contacts`, `after:e11:contacts/events`; T03
+`revision_race_final:contacts/events`), `locking.jsonl` (T03 `await_block`) and
+`deliveries.jsonl`. Test definitions are in [test_crm.py](tests/test_crm.py), and
+observer queries/coordination are in [conftest.py](tests/conftest.py).
 
 ## Design and ordering contract
 
@@ -49,34 +69,48 @@ are tested; no latency or throughput comparison is made.
   equal revisions are flagged as `revision_conflict`, preserving accepted contact state.
   This policy does not choose which conflicting payload is true.
 
+Provider revision reliability is an input assumption, not something this synthetic
+fixture verifies. PostgreSQL 17 documents the database mechanisms:
+[INSERT ... ON CONFLICT](https://www.postgresql.org/docs/17/sql-insert.html#SQL-ON-CONFLICT)
+and [transaction isolation](https://www.postgresql.org/docs/17/transaction-iso.html).
+
 ## Reproduce with GitHub Actions
 
 No local Docker Desktop, database or Python environment is required. Execution is
 restricted to GitHub-hosted Ubuntu using an ephemeral PostgreSQL service container.
 
-1. Use this repository with write access, or create your own copy and enable Actions.
-   Check your current Actions allowance and spending controls before dispatch;
-   private copies can consume included minutes and artifact storage.
-2. Open **Actions → CRM correctness experiment → Run workflow**, select `main` and
-   dispatch once. The workflow is manual only: pushes, pull requests and schedules
-   do not execute it.
-3. Require both repetition jobs to pass for the same source commit, run and attempt.
-   Each runs all **85 parameterized integration cases** on a fresh independent
-   PostgreSQL service, with isolated per-test schemas and real independent sessions.
-4. Download both `crm-evidence-RUN_ID-attempt-ATTEMPT-repetition-N` artifacts. They
-   expire after **seven days**. Preserve them if longer retention is needed.
+1. Fork this repository into your own GitHub account. In the fork's **Actions** tab,
+   enable workflows if GitHub prompts you. Check your account's current allowance
+   and spending controls before dispatch; private repositories can consume included
+   minutes and artifact storage. No repository secrets are required.
+2. In **your fork**, open **Actions → CRM correctness experiment → Run workflow**,
+   select `main` and dispatch once. The workflow is manual only: pushes, pull requests
+   and schedules do not execute it.
+3. Require all four jobs to pass for the same source commit, run and attempt: two
+   independent clean repetitions for each target, PostgreSQL **17.11** and Percona
+   Distribution for PostgreSQL **18.6.1**. Each runs all **85 parameterized
+   integration cases** on a fresh PostgreSQL service, with isolated per-test schemas
+   and real independent sessions.
+4. Sign in to GitHub and download the four target-labelled
+   `crm-evidence-RUN_ID-attempt-ATTEMPT-TARGET-repetition-N` artifacts. Workflow
+   artifacts expire after **seven days**; the [v1.1.0 release](https://github.com/yananai-chiwuta/percona-crm-correctness/releases/tag/v1.1.0)
+   provides the evidence bundles and their checksum manifest.
 
-For this repository, the equivalent dispatch and inspection commands are:
+With authenticated GitHub CLI, replace `YOUR_GITHUB_LOGIN` with your fork owner:
 
 ```text
-gh workflow run crm-correctness.yml --repo yananai-chiwuta/percona-crm-correctness --ref main
-gh run list --repo yananai-chiwuta/percona-crm-correctness --workflow crm-correctness.yml
-gh run view RUN_ID --repo yananai-chiwuta/percona-crm-correctness
-gh run download RUN_ID --repo yananai-chiwuta/percona-crm-correctness --dir evidence/downloads/RUN_ID
+gh workflow run crm-correctness.yml --repo YOUR_GITHUB_LOGIN/percona-crm-correctness --ref main
+gh run list --repo YOUR_GITHUB_LOGIN/percona-crm-correctness --workflow crm-correctness.yml
+gh run view RUN_ID --repo YOUR_GITHUB_LOGIN/percona-crm-correctness
+gh run download RUN_ID --repo YOUR_GITHUB_LOGIN/percona-crm-correctness --dir evidence/downloads/RUN_ID
 ```
 
-The [workflow](.github/workflows/crm-correctness.yml) pins Python **3.12.15** and
-PostgreSQL **17.11-bookworm** by image digest. [requirements.lock](requirements.lock)
+The [workflow](.github/workflows/crm-correctness.yml) pins Python **3.12.15**,
+PostgreSQL **17.11-bookworm** at
+`postgres:17.11-bookworm@sha256:3645570cccdfa447589da9f57dd740faa29b30938e861289a5574b6ca6b03826`,
+and Percona Distribution for PostgreSQL **18.6.1** at
+`percona/percona-distribution-postgresql:18.6.1-3@sha256:cf1ef553805898b73764a19276bf2fc9f78148a0215761ad7491c37c3ed31327`.
+[requirements.lock](requirements.lock)
 pins psycopg/binary **3.3.6**, pytest **9.1.1** and transitive dependencies with hashes.
 The runner label is `ubuntu-24.04`; its changing image version is recorded.
 Workflow permissions are `contents: read`, checkout credentials are not persisted,
@@ -97,7 +131,33 @@ status and test exit code; do not treat these as instructions for local executio
 
 ## Evidence and test coverage
 
-Inspect this repository's [manual workflow runs](https://github.com/yananai-chiwuta/percona-crm-correctness/actions/workflows/crm-correctness.yml).
+[Verified public run 38649001953](https://github.com/yananai-chiwuta/percona-crm-correctness/actions/runs/38649001953),
+attempt 1, tested commit **de00349697255cd4fd7e5b9d578c6a8eaf065478**:
+[permanent verified source](https://github.com/yananai-chiwuta/percona-crm-correctness/tree/de00349697255cd4fd7e5b9d578c6a8eaf065478).
+
+| Independent clean PostgreSQL run | Passed | Failures / errors / skips | Pytest exit | Verified blocking cases | Evidence |
+|---|---|---|---|---|---|
+| Repetition 1 | 85 | 0 / 0 / 0 | 0 | 26 | [Release evidence](https://github.com/yananai-chiwuta/percona-crm-correctness/releases/download/v1.1.0/crm-evidence-38649001953-attempt-1-repetition-1.zip) |
+| Repetition 2 | 85 | 0 / 0 / 0 | 0 | 26 | [Release evidence](https://github.com/yananai-chiwuta/percona-crm-correctness/releases/download/v1.1.0/crm-evidence-38649001953-attempt-1-repetition-2.zip) |
+
+Each job had a distinct fresh PostgreSQL 17.11 service and zero initial test schemas;
+both used Python 3.12.15. Counts are recorded in `summary.json`, `junit.xml` and raw
+`test-output.txt`; environment/source identities are in `environment.json` and
+`source-checksums.sha256`. The T02/T03 observations above remain readable after
+artifacts expire. Later documentation commits are not the originally tested SHA.
+
+[Verified two-target run 38931356745](https://github.com/yananai-chiwuta/percona-crm-correctness/actions/runs/38931356745),
+attempt 1, tested commit **648beac9e5b3dae6e77b9a172c6604693dae5161**:
+
+| Database target | Repetition | Passed | Failures / errors / skips | Verified blocking cases | Evidence |
+|---|---:|---:|---:|---:|---|
+| PostgreSQL 17.11 | 1 | 85 | 0 / 0 / 0 | 26 | [Release evidence](https://github.com/yananai-chiwuta/percona-crm-correctness/releases/download/v1.1.0/crm-evidence-38931356745-attempt-1-postgresql-17.11-repetition-1.zip) |
+| PostgreSQL 17.11 | 2 | 85 | 0 / 0 / 0 | 26 | [Release evidence](https://github.com/yananai-chiwuta/percona-crm-correctness/releases/download/v1.1.0/crm-evidence-38931356745-attempt-1-postgresql-17.11-repetition-2.zip) |
+| Percona Distribution for PostgreSQL 18.6.1 | 1 | 85 | 0 / 0 / 0 | 26 | [Release evidence](https://github.com/yananai-chiwuta/percona-crm-correctness/releases/download/v1.1.0/crm-evidence-38931356745-attempt-1-percona-postgresql-18-repetition-1.zip) |
+| Percona Distribution for PostgreSQL 18.6.1 | 2 | 85 | 0 / 0 / 0 | 26 | [Release evidence](https://github.com/yananai-chiwuta/percona-crm-correctness/releases/download/v1.1.0/crm-evidence-38931356745-attempt-1-percona-postgresql-18-repetition-2.zip) |
+
+The 17.11 results above are separate from the original 17.11 run on **de00349697255cd4fd7e5b9d578c6a8eaf065478**.
+
 Each artifact connects observations to the **actual release commit SHA**, workflow
 run, attempt and repetition. It contains raw test output, JUnit, collection/execution
 inventories, environment and image identities, dependency logs, exact SQL state
@@ -134,6 +194,6 @@ PostgreSQL transactions cannot atomically guarantee effects on an external CRM A
 
 ## Licence
 
-The proposed release licence is [MIT](LICENSE), covering this repository's original
+This project is released under [MIT](LICENSE), covering this repository's original
 code and documentation. Dependencies retain their respective licences. Article
 publication terms are separate from this repository's code licence.
